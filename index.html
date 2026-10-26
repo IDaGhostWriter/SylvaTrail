@@ -168,6 +168,37 @@ footer {
   .card { flex-direction: column; }
   .qr-wrap { flex-direction: row; align-self: flex-start; }
 }
+.music-toggle {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right, 0px));
+  bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  z-index: 20;
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 10px 15px 10px 12px;
+  background: var(--surface); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.12);
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; cursor: pointer;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.music-toggle:hover { border-color: var(--accent); transform: translateY(-1px); }
+.music-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mt-icon { position: relative; width: 16px; height: 16px; flex-shrink: 0; color: var(--accent); }
+.mt-icon .bar {
+  position: absolute; bottom: 2px; width: 3px; border-radius: 2px;
+  background: currentColor; transform-origin: bottom;
+}
+.mt-icon .bar:nth-child(1) { left: 1px; height: 7px; }
+.mt-icon .bar:nth-child(2) { left: 6px; height: 12px; }
+.mt-icon .bar:nth-child(3) { left: 11px; height: 9px; }
+.music-toggle.playing .mt-icon .bar { animation: eq 1.1s ease-in-out infinite; }
+.music-toggle.playing .mt-icon .bar:nth-child(2) { animation-delay: .25s; }
+.music-toggle.playing .mt-icon .bar:nth-child(3) { animation-delay: .5s; }
+@keyframes eq { 0%,100% { transform: scaleY(.45); } 50% { transform: scaleY(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .music-toggle.playing .mt-icon .bar { animation: none; }
+}
 </style>
 
 <div class="wrap">
@@ -317,3 +348,120 @@ footer {
     <span>Tap a card for the paper &middot; scan to read on mobile</span>
   </footer>
 </div>
+
+<button id="musicToggle" class="music-toggle" aria-pressed="false" aria-label="Play ambient background music">
+  <span class="mt-icon" aria-hidden="true"><span class="bar"></span><span class="bar"></span><span class="bar"></span></span>
+  <span class="mt-label">Ambience</span>
+</button>
+
+<script>
+(function () {
+  // Procedural ambient pad + sparse bells via Web Audio. No external files; starts on click (autoplay policy).
+  var btn = document.getElementById('musicToggle');
+  var label = btn.querySelector('.mt-label');
+  var ctx = null, master = null, pads = [], timer = null, playing = false;
+
+  // D minor pentatonic-ish palette (Hz)
+  var drone = [73.42, 110.00, 146.83];           // D2, A2, D3
+  var bells = [293.66, 349.23, 440.00, 587.33, 659.25]; // D4 F4 A4 D5 E5
+
+  function now() { return ctx.currentTime; }
+
+  function makeReverb() {
+    var d = ctx.createDelay(1.5);
+    d.delayTime.value = 0.42;
+    var fb = ctx.createGain(); fb.gain.value = 0.38;
+    var tone = ctx.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 2200;
+    d.connect(fb); fb.connect(tone); tone.connect(d);
+    return d;
+  }
+
+  function startPads(verb) {
+    drone.forEach(function (f, i) {
+      var o = ctx.createOscillator();
+      o.type = i === 0 ? 'sine' : 'triangle';
+      o.frequency.value = f;
+      var o2 = ctx.createOscillator();
+      o2.type = 'sine'; o2.frequency.value = f * 1.004; // slow detune beat
+      var g = ctx.createGain(); g.gain.value = 0;
+      var filt = ctx.createBiquadFilter();
+      filt.type = 'lowpass'; filt.frequency.value = 600;
+      // slow filter sweep
+      var lfo = ctx.createOscillator(); lfo.frequency.value = 0.03 + i * 0.01;
+      var lfoGain = ctx.createGain(); lfoGain.gain.value = 260;
+      lfo.connect(lfoGain); lfoGain.connect(filt.frequency);
+      o.connect(filt); o2.connect(filt); filt.connect(g);
+      g.connect(master); g.connect(verb);
+      o.start(); o2.start(); lfo.start();
+      g.gain.linearRampToValueAtTime(0.055, now() + 6);
+      pads.push(o, o2, lfo, g);
+    });
+  }
+
+  function bell(verb) {
+    if (!playing) return;
+    var f = bells[Math.floor(Math.random() * bells.length)];
+    var o = ctx.createOscillator();
+    o.type = 'sine'; o.frequency.value = f;
+    var g = ctx.createGain(); g.gain.value = 0;
+    o.connect(g); g.connect(master); g.connect(verb);
+    var t = now();
+    g.gain.linearRampToValueAtTime(0.09, t + 0.8);
+    g.gain.exponentialRampToValueAtTime(0.0008, t + 6.5);
+    o.start(t); o.stop(t + 7);
+    timer = setTimeout(function () { bell(verb); }, 3500 + Math.random() * 4500);
+  }
+
+  var verb;
+  function start() {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    master = ctx.createGain(); master.gain.value = 0.0;
+    master.connect(ctx.destination);
+    verb = makeReverb(); verb.connect(master);
+    startPads(verb);
+    master.gain.linearRampToValueAtTime(0.9, now() + 5);
+    timer = setTimeout(function () { bell(verb); }, 1500);
+  }
+
+  function stop() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (master) master.gain.linearRampToValueAtTime(0.0001, now() + 1.2);
+    var old = ctx;
+    setTimeout(function () { try { old && old.close(); } catch (e) {} }, 1400);
+    ctx = null; master = null; pads = [];
+  }
+
+  function setUI(on) {
+    btn.classList.toggle('playing', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    label.textContent = on ? 'Playing' : 'Ambience';
+  }
+  function play() {
+    if (playing) return;
+    try { start(); playing = true; setUI(true); }
+    catch (e) { playing = false; setUI(false); label.textContent = 'Unavailable'; }
+  }
+  function halt() { if (!playing) return; stop(); playing = false; setUI(false); }
+
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    playing ? halt() : play();
+  });
+
+  // "Autoplay": browsers block sound until the visitor interacts, so start on the
+  // first gesture anywhere on the page (click / tap / scroll / key). Fires once.
+  function kickoff(e) {
+    if (e && btn.contains(e.target)) { removeKick(); return; } // let the button handle its own tap
+    if (!playing) play();
+    removeKick();
+  }
+  function removeKick() {
+    ['pointerdown', 'touchstart', 'keydown', 'wheel', 'scroll'].forEach(function (ev) {
+      window.removeEventListener(ev, kickoff, true);
+    });
+  }
+  ['pointerdown', 'touchstart', 'keydown', 'wheel', 'scroll'].forEach(function (ev) {
+    window.addEventListener(ev, kickoff, { capture: true, once: false, passive: true });
+  });
+})();
+</script>
